@@ -1,0 +1,29 @@
+# 빌드 컨텍스트 최소화 — Dockerfile이 COPY하는 것(src, scripts, requirements, README,
+# BestSavedAgents/evaluated641.pth, models/ppo_2action4/best_model.pth, models/obs_small/best_model.pth)만 남기고 제외.
+.git/
+logs/
+videos/
+videos_*/
+AICarRacing_TeamB_submission/
+*.zip
+*.tar.gz
+*.tar.gz.part_*
+report_assets/
+report_front/
+COMBINED_REPORT.*
+SUBMISSION_README.md
+HANDOFF.md
+evaluation_*.png
+**/__pycache__/
+**/*.pyc
+**/.DS_Store
+
+# 대용량/불필요 체크포인트 (COPY하는 3개만 남김)
+models/ppo_2action/
+models/ppo_2action2/
+models/ppo_2action3/
+models/ppo_2action_obstacles/
+models/ppo_4action/
+models/ppo_2action4/latest_model.pth
+models/obs_small/latest_model.pth
+BestSavedAgents/Evaluated679.pth

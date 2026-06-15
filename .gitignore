@@ -183,3 +183,6 @@ development_log.md
 /evaluation_*.png
 # 생성 중간물 (md 소스와 pdf/docx는 추적)
 /COMBINED_REPORT.html
+# docker 이미지 export (대용량 — gzip 본 + 분할본)
+*.tar.gz
+*.tar.gz.part_*
