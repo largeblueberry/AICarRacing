@@ -4,10 +4,16 @@ import numpy as np
 import os
 import time
 import argparse
+import sys
 import matplotlib.pyplot as plt
 import typing
 
-from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit
+# Make ``src`` importable when run as `python scripts/evaluate_agent_2action.py`.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit, ActionWrapper
 from src.ppo_agent import PPOAgent
 from src.random_agent import RandomAgent
 
@@ -61,10 +67,11 @@ def set_seeds(seed: int):
 
 def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union[str, None] = None, max_episode_steps: int = 1000):
     """
-    Creates and wraps the evaluation environment.
+    Creates and wraps the (base, no-obstacle) evaluation environment.
 
     Applies necessary wrappers (GrayScaleObservation, TimeLimit, FrameStack)
-    consistent with the training setup, but without reward shaping.
+    consistent with the training setup, but without reward shaping. For obstacle
+    evaluation use scripts/evaluate_agent_2action_obstacles.py instead.
 
     Args:
         env_id: The ID of the Gymnasium environment.
@@ -83,6 +90,7 @@ def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union
     env.action_space.seed(seed + 100)
 
     # Apply standard wrappers (must match training configuration except for reward shaping)
+    env = ActionWrapper(env)
     env = GrayScaleObservation(env)
     env = TimeLimit(env, max_episode_steps=max_episode_steps)
     env = FrameStack(env, frame_stack)
@@ -90,13 +98,14 @@ def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union
 
 # --- Main Evaluation Script --- #
 if __name__ == "__main__":
-    # --- Hardcode Model Path Here --- #
-    # <<< REPLACE THIS WITH THE ACTUAL PATH TO YOUR .pth FILE >>>
-    HARDCODED_MODEL_PATH = "./models/ppo_3action/best_model.pth"
+    # --- Default Model Path (override with --model) --- #
+    DEFAULT_MODEL_PATH = "./models/ppo_2action2/best_model.pth"
     # ---------------------------------- #
 
-    # --- Argument Parsing --- 
+    # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent on CarRacing-v3")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH,
+                        help=f"Path to the .pth checkpoint to evaluate (default: {DEFAULT_MODEL_PATH}).")
     parser.add_argument("--episodes", type=int, default=config["n_eval_episodes"],
                         help=f"Number of episodes to run for evaluation (default: {config['n_eval_episodes']}).")
     parser.add_argument("--seed", type=int, default=config["seed"],
@@ -110,6 +119,9 @@ if __name__ == "__main__":
     parser.add_argument("--random", action='store_true',
                         help="Use a random agent instead of loading a trained model (default: disabled).")
     args = parser.parse_args()
+
+    # All downstream code references HARDCODED_MODEL_PATH; bind it to --model.
+    HARDCODED_MODEL_PATH = args.model
 
     # --- Configuration Update ---
     # Override default config with command-line arguments
@@ -159,7 +171,9 @@ if __name__ == "__main__":
         print(f"Loading model weights from {HARDCODED_MODEL_PATH}...") # Use hardcoded path
         try:
             # Load the checkpoint onto the specified device
-            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"]) # Use hardcoded path
+            # weights_only=False: our own training checkpoint contains numpy scalars
+            # (mean_reward) etc.; torch>=2.6 defaults to True and would refuse to load.
+            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"], weights_only=False)
 
             # Load state dictionaries for the networks
             agent.feature_extractor.load_state_dict(checkpoint['feature_extractor_state_dict'])
@@ -213,8 +227,8 @@ if __name__ == "__main__":
                 # Convert to tensor on the correct device (agent.act now handles numpy input)
                 # obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=config["device"])
 
-                # Get deterministic action from agent (or sample if needed)
-                # For evaluation, usually take the mean action (deterministic)
+                # Get action from agent (samples from the policy, matching the
+                # evaluation graphs).
                 with torch.no_grad():
                     # Pass observation directly to act (handles tensor conversion)
                     actions, _, _ = agent.act(observation)

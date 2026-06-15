@@ -1,3 +1,11 @@
+"""PPO agent variant dedicated to the 2-action experiment (train_ppo_2action2.py).
+
+Forked from ``ppo_agent.py`` so the 2-action line can be tuned independently of
+the working 3-action setup. The key behavioural difference is a *per-minibatch*
+KL early stop in ``learn``/``learn_mixed_precision`` (the original checked KL only
+once per epoch, which let the policy blow past target_kl with large buffers).
+"""
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -292,28 +300,34 @@ class PPOAgent:
 
         return action_np, value_np, log_prob_np
 
-    def update_learning_rate(self, total_timesteps: int) -> float:
+    def update_learning_rate(self, current_step: int, total_timesteps: int) -> float:
         """
         Updates the learning rate for both optimizers based on a schedule.
 
-        Implements linear warmup followed by cosine decay.
+        Implements linear warmup followed by cosine decay, driven by the number
+        of ENVIRONMENT steps elapsed (``current_step``). The original version
+        divided an internal per-call counter (rollout count, only a few hundred)
+        by ``total_timesteps`` (millions), so progress stayed ~0 and the LR never
+        actually decayed. Driving the schedule by ``current_step`` makes progress
+        sweep 0 -> 1 across the run as intended.
 
         Args:
-            total_timesteps: The total number of training steps planned.
+            current_step: Environment steps elapsed so far (e.g. global_step).
+            total_timesteps: The total number of environment steps planned.
 
         Returns:
             The newly calculated learning rate.
         """
-        self.steps_done += 1 # Increment internal step counter
+        self.steps_done += 1  # kept for external bookkeeping/compatibility
 
         # Warmup Phase: Linearly increase LR from 30% to 100% of initial_lr
-        if self.steps_done < self.lr_warmup_steps:
-            alpha = self.steps_done / self.lr_warmup_steps
+        if self.lr_warmup_steps > 0 and current_step < self.lr_warmup_steps:
+            alpha = current_step / self.lr_warmup_steps
             current_lr = self.initial_lr * (0.3 + 0.7 * alpha)
         # Decay Phase: Cosine annealing from initial_lr to near zero
         else:
-            progress = min((self.steps_done - self.lr_warmup_steps) /
-                           (total_timesteps - self.lr_warmup_steps), 1.0)
+            denom = max(total_timesteps - self.lr_warmup_steps, 1)
+            progress = min(max((current_step - self.lr_warmup_steps) / denom, 0.0), 1.0)
             current_lr = self.initial_lr * 0.5 * (1.0 + np.cos(np.pi * progress))
 
         # Ensure LR doesn't drop below the configured minimum threshold
@@ -349,6 +363,7 @@ class PPOAgent:
         all_kl_divs, clip_fractions = [], []
 
         # PPO Optimization Loop
+        continue_training = True  # cleared when a minibatch exceeds target_kl
         for epoch in range(self.epochs):
             epoch_kl_divs = [] # Track KL divergence per epoch for potential early stopping
 
@@ -427,11 +442,14 @@ class PPOAgent:
                 epoch_kl_divs.append(approx_kl)
                 clip_fractions.append(clip_frac)
 
-            # --- End of Epoch KL Check (Optional Early Stopping) ---
-            epoch_mean_kl = np.mean(epoch_kl_divs)
-            if self.target_kl is not None and epoch_mean_kl > self.target_kl * 1.5:
-                print(f"Warning: Early stopping PPO epoch {epoch+1} due to high KL divergence: {epoch_mean_kl:.4f} > {self.target_kl*1.5:.4f}")
-                break #if kl divergence is too high, break the loop
+                # --- Per-minibatch KL early stop (2-action stability fix) ---
+                if self.target_kl is not None and approx_kl > self.target_kl * 1.5:
+                    print(f"Early stop: epoch {epoch+1} minibatch KL {approx_kl:.4f} > {self.target_kl*1.5:.4f}")
+                    continue_training = False
+                    break
+
+            if not continue_training:
+                break
 
         # --- Return Averaged Metrics ---
         avg_metrics = {
@@ -463,6 +481,7 @@ class PPOAgent:
         all_kl_divs, clip_fractions = [], []
 
         # PPO Optimization Loop
+        continue_training = True  # cleared when a minibatch exceeds target_kl
         for epoch in range(self.epochs):
             epoch_kl_divs = [] # Track KL divergence per epoch
 
@@ -528,11 +547,17 @@ class PPOAgent:
                 epoch_kl_divs.append(approx_kl)
                 clip_fractions.append(clip_frac)
 
-            # --- End of Epoch KL Check ---
-            epoch_mean_kl = np.mean(epoch_kl_divs)
-            if self.target_kl is not None and epoch_mean_kl > self.target_kl * 1.5:
-                print(f"Warning: PPO epoch {epoch+1} KL divergence high: {epoch_mean_kl:.4f} > {self.target_kl*1.5:.4f}")
-                break # Optional early stopping
+                # --- Per-minibatch KL early stop (2-action stability fix) ---
+                # Check after EVERY update, not once per epoch. With a large
+                # buffer there are many updates per epoch; a per-epoch check lets
+                # the policy blow far past target_kl before stopping (KL spikes).
+                if self.target_kl is not None and approx_kl > self.target_kl * 1.5:
+                    print(f"Early stop: epoch {epoch+1} minibatch KL {approx_kl:.4f} > {self.target_kl*1.5:.4f}")
+                    continue_training = False
+                    break
+
+            if not continue_training:
+                break
 
         # --- Return Averaged Metrics ---
         avg_metrics = {

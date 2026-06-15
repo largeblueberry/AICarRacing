@@ -4,18 +4,27 @@ import numpy as np
 import os
 import time
 import argparse
+import sys
 import matplotlib.pyplot as plt
 import typing
 
-from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit
+# Make ``src`` importable when run as `python scripts/evaluate_agent_2action_obstacles.py`.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit, ActionWrapper
 from src.ppo_agent import PPOAgent
 from src.random_agent import RandomAgent
 
 # --- Configuration --- #
-# Default configuration for evaluation script
+# Default configuration for evaluation script.
+# This is the OBSTACLE evaluator for the 2-action line: the env is always
+# CarRacingObstacles-v0 (random static obstacles). For clean base-track eval
+# use scripts/evaluate_agent_2action.py instead.
 config = {
     # Environment settings
-    "env_id": "CarRacing-v3",
+    "env_id": "CarRacingObstacles-v0",
     "frame_stack": 4,
     "seed": 42, # Seed used for all evaluation graphs
     "max_episode_steps": 1000, # Max steps per evaluation episode
@@ -59,30 +68,38 @@ def set_seeds(seed: int):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union[str, None] = None, max_episode_steps: int = 1000):
+def make_env(seed: int, frame_stack: int, render_mode: typing.Union[str, None] = None, max_episode_steps: int = 1000,
+             n_obstacles: int = 10, obstacle_size_min: float = 0.25, obstacle_size_max: float = 0.6):
     """
-    Creates and wraps the evaluation environment.
+    Creates and wraps the OBSTACLE evaluation environment (CarRacingObstacles-v0).
 
-    Applies necessary wrappers (GrayScaleObservation, TimeLimit, FrameStack)
-    consistent with the training setup, but without reward shaping.
+    Applies the same wrappers as the 2-action training setup (ActionWrapper +
+    GrayScaleObservation, TimeLimit, FrameStack), but without reward shaping.
+    The obstacle size distribution MUST match the training distribution for a
+    fair comparison (pass the same --obstacle-size-min/max used in training).
 
     Args:
-        env_id: The ID of the Gymnasium environment.
         seed: The random seed for environment initialization.
         frame_stack: The number of frames to stack.
         render_mode: The render mode ('human' or None).
         max_episode_steps: Maximum steps per episode for the TimeLimit wrapper.
+        n_obstacles: Number of static obstacles.
+        obstacle_size_min/max: Obstacle size as a fraction of TRACK_WIDTH
+            (2.0 == road width; > 2.0 is bigger than the road).
 
     Returns:
         The wrapped Gymnasium environment.
     """
-    # Create the base environment
-    env = gym.make(env_id, continuous=True, domain_randomize=False, render_mode=render_mode)
+    import src.car_racing_obstacles  # noqa: F401  registers the env id
+    env = gym.make("CarRacingObstacles-v0", continuous=True, domain_randomize=False,
+                   render_mode=render_mode, n_obstacles=n_obstacles,
+                   obstacle_size_min=obstacle_size_min, obstacle_size_max=obstacle_size_max)
     # Seed the environment (use a different offset than training if desired)
     env.reset(seed=seed + 100) # Use a different seed offset for evaluation
     env.action_space.seed(seed + 100)
 
-    # Apply standard wrappers (must match training configuration except for reward shaping)
+    # 2-action policy: ActionWrapper maps [steering, throttle] -> native [steer, gas, brake].
+    env = ActionWrapper(env)
     env = GrayScaleObservation(env)
     env = TimeLimit(env, max_episode_steps=max_episode_steps)
     env = FrameStack(env, frame_stack)
@@ -90,13 +107,16 @@ def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union
 
 # --- Main Evaluation Script --- #
 if __name__ == "__main__":
-    # --- Hardcode Model Path Here --- #
-    # <<< REPLACE THIS WITH THE ACTUAL PATH TO YOUR .pth FILE >>>
-    HARDCODED_MODEL_PATH = "./models/ppo_3action/best_model.pth"
+    # --- Default Model Path (override with --model) --- #
+    # Bundled 2-action obstacle model (clean 365/325). The best model (obs_small_p02,
+    # clean 415/422) lives only on the remote training server; pass it via --model if available.
+    DEFAULT_MODEL_PATH = "./models/obs_small/best_model.pth"
     # ---------------------------------- #
 
-    # --- Argument Parsing --- 
-    parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent on CarRacing-v3")
+    # --- Argument Parsing ---
+    parser = argparse.ArgumentParser(description="Evaluate a trained 2-action PPO agent on CarRacingObstacles-v0 (obstacle avoidance)")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH,
+                        help=f"Path to the .pth checkpoint to evaluate (default: {DEFAULT_MODEL_PATH}).")
     parser.add_argument("--episodes", type=int, default=config["n_eval_episodes"],
                         help=f"Number of episodes to run for evaluation (default: {config['n_eval_episodes']}).")
     parser.add_argument("--seed", type=int, default=config["seed"],
@@ -109,7 +129,20 @@ if __name__ == "__main__":
                         help=f"Maximum steps per evaluation episode (default: {config['max_episode_steps']}).")
     parser.add_argument("--random", action='store_true',
                         help="Use a random agent instead of loading a trained model (default: disabled).")
+    # --obstacles is accepted for backward-compat with old commands but is a no-op:
+    # this script ALWAYS evaluates on the obstacle env.
+    parser.add_argument("--obstacles", action='store_true',
+                        help="(no-op) accepted for backward-compat; this script always uses CarRacingObstacles-v0.")
+    parser.add_argument("--n-obstacles", type=int, default=10,
+                        help="Number of obstacles (default: 10).")
+    parser.add_argument("--obstacle-size-min", type=float, default=0.25,
+                        help="Min obstacle size frac of TRACK_WIDTH (2.0==road width; >2.0 bigger than road).")
+    parser.add_argument("--obstacle-size-max", type=float, default=0.6,
+                        help="Max obstacle size frac of TRACK_WIDTH.")
     args = parser.parse_args()
+
+    # All downstream code references HARDCODED_MODEL_PATH; bind it to --model.
+    HARDCODED_MODEL_PATH = args.model
 
     # --- Configuration Update ---
     # Override default config with command-line arguments
@@ -119,7 +152,7 @@ if __name__ == "__main__":
     config["max_episode_steps"] = args.max_steps
     render_mode = "human" if args.render else None
 
-    print("--- Evaluation Configuration ---")
+    print("--- Evaluation Configuration (OBSTACLES, 2-action) ---")
     print(f"Device: {config['device']}")
     if not args.random:
         print(f"Model Path: {HARDCODED_MODEL_PATH}") # Use hardcoded path
@@ -129,6 +162,7 @@ if __name__ == "__main__":
     print(f"Environment Seed: {config['seed']}")
     print(f"Features Dimension: {config['features_dim']}")
     print(f"Max Steps per Episode: {config['max_episode_steps']}")
+    print(f"Obstacles: {args.n_obstacles}  size_frac=[{args.obstacle_size_min}, {args.obstacle_size_max}]")
     print(f"Rendering: {'Enabled' if render_mode else 'Disabled'}")
     print("------------------------------")
 
@@ -136,8 +170,10 @@ if __name__ == "__main__":
     set_seeds(config["seed"])
 
     # --- Environment and Agent Setup ---
-    # Create the evaluation environment
-    env = make_env(config["env_id"], config["seed"], config["frame_stack"], render_mode, config["max_episode_steps"])
+    # Create the evaluation environment (always obstacles)
+    env = make_env(config["seed"], config["frame_stack"], render_mode, config["max_episode_steps"],
+                   n_obstacles=args.n_obstacles,
+                   obstacle_size_min=args.obstacle_size_min, obstacle_size_max=args.obstacle_size_max)
 
     if args.random:
         # Use RandomAgent for baseline comparison
@@ -159,7 +195,9 @@ if __name__ == "__main__":
         print(f"Loading model weights from {HARDCODED_MODEL_PATH}...") # Use hardcoded path
         try:
             # Load the checkpoint onto the specified device
-            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"]) # Use hardcoded path
+            # weights_only=False: our own training checkpoint contains numpy scalars
+            # (mean_reward) etc.; torch>=2.6 defaults to True and would refuse to load.
+            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"], weights_only=False)
 
             # Load state dictionaries for the networks
             agent.feature_extractor.load_state_dict(checkpoint['feature_extractor_state_dict'])
@@ -208,13 +246,8 @@ if __name__ == "__main__":
                     else:
                          raise ValueError("Cannot proceed with incompatible observation shape.")
 
-                # Add batch dimension for the agent's act method
-                # obs_batch = np.expand_dims(observation, axis=0)
-                # Convert to tensor on the correct device (agent.act now handles numpy input)
-                # obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=config["device"])
-
-                # Get deterministic action from agent (or sample if needed)
-                # For evaluation, usually take the mean action (deterministic)
+                # Get action from agent (samples from the policy, matching the
+                # evaluation graphs).
                 with torch.no_grad():
                     # Pass observation directly to act (handles tensor conversion)
                     actions, _, _ = agent.act(observation)
@@ -245,7 +278,7 @@ if __name__ == "__main__":
         episode_rewards.append(current_episode_reward)
         episode_lengths.append(current_episode_length)
 
-    # --- Cleanup and Results --- 
+    # --- Cleanup and Results ---
     env.close()
 
     # Calculate summary statistics
@@ -259,7 +292,7 @@ if __name__ == "__main__":
     mean_length = np.mean(episode_lengths)
     std_length = np.std(episode_lengths)
 
-    print("\n--- Evaluation Summary ---")
+    print("\n--- Evaluation Summary (OBSTACLES, 2-action) ---")
     print(f"Number of Episodes: {config['n_eval_episodes']}")
     print(f"Mean Reward: {mean_reward:.2f} +/- {std_reward:.2f}")
     print(f"Median Reward: {median_reward:.2f}")
@@ -297,9 +330,9 @@ if __name__ == "__main__":
     plt.axhline(lower_quartile, color='m', linestyle=':', label=f'Lower Quartile ({lower_quartile:.2f})')
     plt.axhline(upper_quartile, color='c', linestyle=':', label=f'Upper Quartile ({upper_quartile:.2f})')
     if args.random:
-        plt.title(f'Random Agent Evaluation Results ({config["n_eval_episodes"]} Episodes)')
+        plt.title(f'Random Agent (Obstacles) Evaluation Results ({config["n_eval_episodes"]} Episodes)')
     else:
-        plt.title(f'Agent Evaluation Results ({config["n_eval_episodes"]} Episodes)\nModel: {os.path.basename(HARDCODED_MODEL_PATH)}')
+        plt.title(f'Agent (Obstacles) Evaluation Results ({config["n_eval_episodes"]} Episodes)\nModel: {os.path.basename(HARDCODED_MODEL_PATH)}')
     plt.xlabel('Episode Number')
     plt.ylabel('Total Episodic Reward')
     plt.legend()
@@ -312,7 +345,7 @@ if __name__ == "__main__":
         model_name = "random_baseline"
     else:
         model_name = os.path.splitext(os.path.basename(HARDCODED_MODEL_PATH))[0] # Use hardcoded path
-    plot_filename = f"evaluation_{model_name}_{config['n_eval_episodes']}ep_seed{config['seed']}.png"
+    plot_filename = f"evaluation_obstacles_{model_name}_{config['n_eval_episodes']}ep_seed{config['seed']}.png"
     try:
         plt.savefig(plot_filename)
         print(f"\nEvaluation plot saved as: {plot_filename}")
@@ -322,4 +355,4 @@ if __name__ == "__main__":
     # --- Display Plot ---
     # Optionally display the plot
     plt.show()
-    # print("Plot display complete.") 
+    # print("Plot display complete.")

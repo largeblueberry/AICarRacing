@@ -66,8 +66,8 @@ config = {
     # Logging and saving
     "log_interval": 1,                  # Number of rollouts between logging summary statistics
     "save_interval": 10,                # Number of rollouts between saving model checkpoints
-    "save_dir": "./models/ppo_carracing",  # Directory to save model checkpoints
-    "log_dir": "./logs/ppo_carracing",     # Directory to save TensorBoard logs
+    "save_dir": "./models/ppo_3action",  # Directory to save model checkpoints
+    "log_dir": "./logs/ppo_3action",     # Directory to save TensorBoard logs
 
     # Checkpoint to load (set to None to start fresh training)
     "checkpoint_path": None, # Path to load a pre-trained model checkpoint

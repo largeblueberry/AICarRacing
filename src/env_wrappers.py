@@ -121,3 +121,22 @@ class FrameStack(gym.ObservationWrapper):
         assert len(self.frames) == self.k, f"Frame buffer size mismatch: expected {self.k}, got {len(self.frames)}"
         # Stack the frames along the first axis (channel dimension)
         return np.stack(self.frames, axis=0) 
+class ActionWrapper(gym.ActionWrapper):
+    """
+    Converts 2D action [steering, throttle] to 3D action [steering, gas, brake].
+    throttle > 0 -> gas, throttle < 0 -> brake
+    """
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = Box(
+            low=np.array([-1.0, -1.0]),
+            high=np.array([1.0, 1.0]),
+            dtype=np.float32
+        )
+
+    def action(self, action):
+        steering = action[0]
+        throttle = action[1]
+        gas = max(0.0, float(throttle))
+        brake = max(0.0, float(-throttle))
+        return np.array([steering, gas, brake], dtype=np.float32)

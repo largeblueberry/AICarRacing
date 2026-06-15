@@ -4,10 +4,16 @@ import numpy as np
 import os
 import time
 import argparse
+import sys
 import matplotlib.pyplot as plt
 import typing
 
-from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit
+# Make ``src`` importable when run as `python scripts/evaluate_agent_2action.py`.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from src.env_wrappers import GrayScaleObservation, FrameStack, TimeLimit, ActionWrapper
 from src.ppo_agent import PPOAgent
 from src.random_agent import RandomAgent
 
@@ -59,7 +65,9 @@ def set_seeds(seed: int):
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
-def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union[str, None] = None, max_episode_steps: int = 1000):
+def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union[str, None] = None, max_episode_steps: int = 1000,
+             obstacles: bool = False, n_obstacles: int = 10,
+             obstacle_size_min: float = 0.25, obstacle_size_max: float = 0.6):
     """
     Creates and wraps the evaluation environment.
 
@@ -77,12 +85,18 @@ def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union
         The wrapped Gymnasium environment.
     """
     # Create the base environment
-    env = gym.make(env_id, continuous=True, domain_randomize=False, render_mode=render_mode)
+    if obstacles:
+        import src.car_racing_obstacles  # noqa: F401  registers the env id
+        env = gym.make("CarRacingObstacles-v0", continuous=True, domain_randomize=False,
+                       render_mode=render_mode, n_obstacles=n_obstacles,
+                       obstacle_size_min=obstacle_size_min, obstacle_size_max=obstacle_size_max)
+    else:
+        env = gym.make(env_id, continuous=True, domain_randomize=False, render_mode=render_mode)
     # Seed the environment (use a different offset than training if desired)
     env.reset(seed=seed + 100) # Use a different seed offset for evaluation
     env.action_space.seed(seed + 100)
 
-    # Apply standard wrappers (must match training configuration except for reward shaping)
+    # 3-action 대조군: ActionWrapper 미적용 (정책이 네이티브 3D [steer,gas,brake] 출력).
     env = GrayScaleObservation(env)
     env = TimeLimit(env, max_episode_steps=max_episode_steps)
     env = FrameStack(env, frame_stack)
@@ -90,13 +104,14 @@ def make_env(env_id: str, seed: int, frame_stack: int, render_mode: typing.Union
 
 # --- Main Evaluation Script --- #
 if __name__ == "__main__":
-    # --- Hardcode Model Path Here --- #
-    # <<< REPLACE THIS WITH THE ACTUAL PATH TO YOUR .pth FILE >>>
-    HARDCODED_MODEL_PATH = "./models/ppo_3action/best_model.pth"
+    # --- Default Model Path (override with --model) --- #
+    DEFAULT_MODEL_PATH = "./models/ppo_3action_obstacles/best_model.pth"  # 3-action 장애물 모델
     # ---------------------------------- #
 
-    # --- Argument Parsing --- 
+    # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO agent on CarRacing-v3")
+    parser.add_argument("--model", type=str, default=DEFAULT_MODEL_PATH,
+                        help=f"Path to the .pth checkpoint to evaluate (default: {DEFAULT_MODEL_PATH}).")
     parser.add_argument("--episodes", type=int, default=config["n_eval_episodes"],
                         help=f"Number of episodes to run for evaluation (default: {config['n_eval_episodes']}).")
     parser.add_argument("--seed", type=int, default=config["seed"],
@@ -109,7 +124,18 @@ if __name__ == "__main__":
                         help=f"Maximum steps per evaluation episode (default: {config['max_episode_steps']}).")
     parser.add_argument("--random", action='store_true',
                         help="Use a random agent instead of loading a trained model (default: disabled).")
+    parser.add_argument("--obstacles", action='store_true',
+                        help="Evaluate on CarRacingObstacles-v0 (random static obstacles).")
+    parser.add_argument("--n-obstacles", type=int, default=10,
+                        help="Number of obstacles when --obstacles is set (default: 10).")
+    parser.add_argument("--obstacle-size-min", type=float, default=0.25,
+                        help="Min obstacle size frac of TRACK_WIDTH (2.0==road width; >2.0 bigger than road).")
+    parser.add_argument("--obstacle-size-max", type=float, default=0.6,
+                        help="Max obstacle size frac of TRACK_WIDTH.")
     args = parser.parse_args()
+
+    # All downstream code references HARDCODED_MODEL_PATH; bind it to --model.
+    HARDCODED_MODEL_PATH = args.model
 
     # --- Configuration Update ---
     # Override default config with command-line arguments
@@ -137,7 +163,9 @@ if __name__ == "__main__":
 
     # --- Environment and Agent Setup ---
     # Create the evaluation environment
-    env = make_env(config["env_id"], config["seed"], config["frame_stack"], render_mode, config["max_episode_steps"])
+    env = make_env(config["env_id"], config["seed"], config["frame_stack"], render_mode, config["max_episode_steps"],
+                   obstacles=args.obstacles, n_obstacles=args.n_obstacles,
+                   obstacle_size_min=args.obstacle_size_min, obstacle_size_max=args.obstacle_size_max)
 
     if args.random:
         # Use RandomAgent for baseline comparison
@@ -159,7 +187,9 @@ if __name__ == "__main__":
         print(f"Loading model weights from {HARDCODED_MODEL_PATH}...") # Use hardcoded path
         try:
             # Load the checkpoint onto the specified device
-            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"]) # Use hardcoded path
+            # weights_only=False: our own training checkpoint contains numpy scalars
+            # (mean_reward) etc.; torch>=2.6 defaults to True and would refuse to load.
+            checkpoint = torch.load(HARDCODED_MODEL_PATH, map_location=config["device"], weights_only=False)
 
             # Load state dictionaries for the networks
             agent.feature_extractor.load_state_dict(checkpoint['feature_extractor_state_dict'])
@@ -213,8 +243,8 @@ if __name__ == "__main__":
                 # Convert to tensor on the correct device (agent.act now handles numpy input)
                 # obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32, device=config["device"])
 
-                # Get deterministic action from agent (or sample if needed)
-                # For evaluation, usually take the mean action (deterministic)
+                # Get action from agent (samples from the policy, matching the
+                # evaluation graphs).
                 with torch.no_grad():
                     # Pass observation directly to act (handles tensor conversion)
                     actions, _, _ = agent.act(observation)
