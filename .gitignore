@@ -167,3 +167,19 @@ AICarRacing_Training_Approach.md
 development_log.md
 
 /docs
+
+# Recorded evaluation rollouts (see scripts/record_video.py)
+/videos
+
+# --- 제출/빌드 산출물 및 대용량 파일 (커밋 제외) ---
+.DS_Store
+**/.DS_Store
+# 영상 폴더 (mp4 대용량; 대표 GIF는 report_assets/에 포함)
+/videos_*/
+# 제출 번들 (체크포인트 사본 포함, 24M) 및 압축본
+/AICarRacing_TeamB_submission/
+*.zip
+# 루트 scratch 평가 플롯 (report_assets/와 별개)
+/evaluation_*.png
+# 생성 중간물 (md 소스와 pdf/docx는 추적)
+/COMBINED_REPORT.html
