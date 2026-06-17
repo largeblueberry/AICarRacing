@@ -670,34 +670,215 @@ per-minibatch KL early-stop이 epoch 3에서 간헐적으로 발화(설계대로
 
 ## 5. 장애물 환경 설계 (`CarRacingObstacles-v0`)
 
-`src/car_racing_obstacles.py`. 부모 클래스는 `CarRacing`(`class CarRacingObstacles(CarRacing)`).
+**파일:** `src/car_racing_obstacles.py` | **부모 클래스:** `CarRacing` (`class CarRacingObstacles(CarRacing)`)
+
+---
 
 ### 5.1 등록 및 기본값
 
-- id `"CarRacingObstacles-v0"`, `entry_point="src.car_racing_obstacles:CarRacingObstacles"`, `max_episode_steps=1000`, `reward_threshold=900`. 중복 등록 가드: `if "CarRacingObstacles-v0" not in gym.registry`.
-- 생성자 기본값: `n_obstacles=10`, `obstacle_penalty=15.0`, `obstacle_size=0.4` (TRACK_WIDTH 분수), `start_clear_tiles=30`, `min_tile_gap=12`.
+`gymnasium.register()`로 환경 ID를 등록하며, 중복 등록 가드(`if "CarRacingObstacles-v0" not in gym.registry`)를 파일 말미에 배치한다.
+
+| 항목 | 값 |
+|---|---|
+| `id` | `"CarRacingObstacles-v0"` |
+| `entry_point` | `"src.car_racing_obstacles:CarRacingObstacles"` |
+| `max_episode_steps` | `1000` |
+| `reward_threshold` | `900` |
+
+생성자 기본값:
+
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `n_obstacles` | `10` | 트랙에 배치할 장애물 수 |
+| `obstacle_penalty` | `15.0` | 충돌 스텝당 차감 보상 |
+| `obstacle_size_min/max` | `0.25 / 0.6` | 장애물 크기 범위 (`TRACK_WIDTH` 분수) |
+| `start_clear_tiles` | `30` | 출발선 주변 장애물 금지 구간 |
+| `min_tile_gap` | `12` | 장애물 간 최소 타일 간격 |
+
+> **Note:** 원본 보고서의 `obstacle_size=0.4` 고정값을 `[obstacle_size_min, obstacle_size_max]` 범위 샘플링으로 확장하였다. 이는 에피소드마다 장애물 크기가 달라져 정책의 일반화를 유도하기 위함이다.
+
+```python
+class CarRacingObstacles(CarRacing):
+    def __init__(self, *args, n_obstacles=10, obstacle_penalty=15.0,
+                 obstacle_size_min=0.25, obstacle_size_max=0.6,
+                 start_clear_tiles=30, min_tile_gap=12, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_obstacles       = n_obstacles
+        self.obstacle_penalty  = obstacle_penalty
+        self.obstacle_size_min = obstacle_size_min
+        self.obstacle_size_max = obstacle_size_max
+        self.start_clear_tiles = start_clear_tiles
+        self.min_tile_gap      = min_tile_gap
+        self.obstacle_bodies        = []
+        self.obstacle_hits_pending  = 0
+```
+
+---
 
 ### 5.2 픽셀 가시성 (관측에 그려 넣기)
 
-핵심 설계: 장애물을 물리 세계에만 두지 않고 **96×96 픽셀 관측에 직접 그려 넣는다**. 회전된 quad를 `road_poly`에 `OBSTACLE_COLOR = (255,255,255)`(흰색)로 추가. grayscale로 255 vs 도로 ~102, 잔디 ~162와 고대비를 형성해 픽셀 입력 에이전트가 인지 가능. (구석 좌표 `(±half, ±half)`를 `c,s = cos beta, sin beta`로 회전.)
+**핵심 설계:** 장애물을 물리 세계에만 두지 않고 96×96 픽셀 관측에 **직접 그려 넣는다.** 회전된 quad를 `road_poly`에 `OBSTACLE_COLOR = (255, 255, 255)` (흰색)로 추가한다. grayscale 기준 255 vs 도로 ~102, 잔디 ~162와 **고대비**를 형성하여 픽셀 입력 에이전트가 인지 가능하다.
+
+구석 좌표 `(±half, ±half)`를 $$c, s = \cos\beta,\ \sin\beta$$로 회전:
+
+$$p_x' = dx \cdot c - dy \cdot s, \quad p_y' = dx \cdot s + dy \cdot c$$
+
+```python
+OBSTACLE_COLOR = (255, 255, 255)   # grayscale 255 — 도로 ~102, 잔디 ~162 대비
+
+# _spawn_obstacles() 내부 — 장애물 1개당 실행
+c, s = math.cos(beta), math.sin(beta)
+quad = [
+    (px + dx*c - dy*s, py + dx*s + dy*c)
+    for dx, dy in ((-half,-half),(half,-half),(half,half),(-half,half))
+]
+self.road_poly.append((quad, OBSTACLE_COLOR))
+```
+
+---
 
 ### 5.3 배치 및 재현성 (`_spawn_obstacles`)
 
-- 타일 후보: `range(start_clear_tiles, n_tiles - start_clear_tiles)` — 루프 트랙이므로 양 끝을 모두 비움. `n_tiles <= 2*start_clear_tiles + 1`이면 early-return.
-- 후보를 `self.np_random.shuffle()`로 셔플(시드별 재현 가능) 후, 이미 선택된 것들과 `>= min_tile_gap` 떨어지도록 greedy 선택, 최대 `n_obstacles`개. 선택 인덱스는 `self.obstacle_tile_indices`에 저장.
-- 반쪽 크기: `half = obstacle_size * TRACK_WIDTH / 2.0`.
-- **주행 가능 간격 보장**: `max_offset = 0.8 * TRACK_WIDTH - half`, `offset = np_random.uniform(-max_offset, max_offset)` — 장애물 바깥 가장자리를 도로 반폭의 ~80% 안쪽에 두어 항상 한쪽에 통로가 남게 함.
-- 위치: `(_, beta, x, y) = track[idx]`에서 `px = x + offset*cos(beta)`, `py = y + offset*sin(beta)` (`(cos β, sin β)`가 도로 횡단축).
-- 물리 body: `CreateStaticBody(position=(px,py), angle=beta, fixtures=fixtureDef(shape=polygonShape(box=(half,half))))`, `body.userData = _ObstacleMarker()`.
+- **타일 후보:** `range(start_clear_tiles, n_tiles - start_clear_tiles)` — 루프 트랙이므로 **양 끝을 모두 비움.** `n_tiles <= 2*start_clear_tiles + 1`이면 early-return.
+- 후보를 `self.np_random.shuffle()`로 셔플(시드별 재현 가능) 후, 이미 선택된 것들과 `>= min_tile_gap` 떨어지도록 **greedy 선택**, 최대 `n_obstacles`개. 선택 인덱스는 `self.obstacle_tile_indices`에 저장.
+- **반쪽 크기:** `half = np_random.uniform(size_min, size_max) * TRACK_WIDTH / 2.0`
+- **주행 가능 간격 보장:** `max_offset = 0.8 * TRACK_WIDTH - half`, `offset = np_random.uniform(-max_offset, max_offset)` — 장애물 바깥 가장자리를 도로 반폭의 ~80% 안쪽에 두어 **항상 한쪽에 통로가 남게 함.**
+- **위치:** `(_, beta, x, y) = track[idx]`에서 $$p_x = x + \text{offset}\cdot\cos\beta,\quad p_y = y + \text{offset}\cdot\sin\beta$$ — $(\cos\beta,\sin\beta)$가 도로 **횡단축.**
+- **물리 body:** `CreateStaticBody(position=(px,py), angle=beta, fixtures=fixtureDef(shape=polygonShape(box=(half,half))))`, `body.userData = _ObstacleMarker()`
+
+```python
+def _spawn_obstacles(self):
+    self.obstacle_bodies = []
+    n_tiles = len(self.track)
+    if n_tiles <= 2 * self.start_clear_tiles + 1:
+        return                                          # 트랙이 너무 짧으면 스킵
+
+    candidates = list(range(self.start_clear_tiles, n_tiles - self.start_clear_tiles))
+    self.np_random.shuffle(candidates)                  # 시드별 재현 가능 셔플
+
+    chosen = []
+    for idx in candidates:
+        if len(chosen) >= self.n_obstacles:
+            break
+        if all(abs(idx - c) >= self.min_tile_gap for c in chosen):
+            chosen.append(idx)                          # greedy gap 필터
+
+    self.obstacle_tile_indices = list(chosen)
+
+    for idx in chosen:
+        _, beta, x, y = self.track[idx]
+        size_frac = self.np_random.uniform(self.obstacle_size_min, self.obstacle_size_max)
+        half      = size_frac * TRACK_WIDTH / 2.0
+        max_offset = max(0.0, 0.8 * TRACK_WIDTH - half)
+        offset     = self.np_random.uniform(-max_offset, max_offset)
+        px = x + offset * math.cos(beta)
+        py = y + offset * math.sin(beta)
+
+        body = self.world.CreateStaticBody(
+            position=(px, py), angle=beta,
+            fixtures=fixtureDef(shape=polygonShape(box=(half, half))),
+        )
+        body.userData = _ObstacleMarker()
+        self.obstacle_bodies.append(body)
+        # road_poly 추가 → 픽셀 관측에 렌더링 (§5.2)
+        c, s = math.cos(beta), math.sin(beta)
+        quad = [(px + dx*c - dy*s, py + dx*s + dy*c)
+                for dx, dy in ((-half,-half),(half,-half),(half,half),(-half,half))]
+        self.road_poly.append((quad, OBSTACLE_COLOR))
+```
+
+---
 
 ### 5.4 충돌 검출 및 패널티
 
-- `ObstacleFrictionDetector(FrictionDetector)`가 `BeginContact`를 오버라이드 — 장애물 접촉이면 `env.obstacle_hits_pending += 1` 후 return(부모 스킵), 아니면 `super().BeginContact`. `EndContact`는 장애물 접촉 시 early-return. `_is_obstacle_contact`는 `userData`의 `is_obstacle`를 확인하며 **예외 발생 시 True 반환**(파괴 중 contact가 sim을 크래시시키지 않도록 belt-and-braces). detector는 `reset()`에서 `contactListener`와 `contactListener_bug_workaround` 양쪽에 설치.
-- step 패널티: `hits = obstacle_hits_pending`(읽고 0으로 리셋), `if action is not None and hits > 0:` → `step_reward -= obstacle_penalty`(15.0). **hit 수와 무관하게 스텝당 1회만** 차감(한 번의 충돌이 hull+wheel 접촉을 동시에 시작할 수 있으므로). `info["obstacle_hit"]=True`, 항상 `info["obstacle_hits"]=hits` 기록. **에피소드는 종료되지 않음**(penalty-only; 차는 물리적으로 튕기며 감속).
+`ObstacleFrictionDetector(FrictionDetector)`가 `BeginContact`를 오버라이드한다.
+
+| 메서드 | 동작 |
+|---|---|
+| `BeginContact` | 장애물 접촉이면 `env.obstacle_hits_pending += 1` 후 `return` (부모 스킵), 아니면 `super().BeginContact()` |
+| `EndContact` | 장애물 접촉이면 early-return, 아니면 `super().EndContact()` |
+| `_is_obstacle_contact` | `userData.is_obstacle` 확인; 예외 발생 시 `True` 반환 (파괴 중 contact가 시뮬레이터를 크래시시키지 않도록 belt-and-braces) |
+
+detector는 `reset()`에서 `contactListener`와 `contactListener_bug_workaround` **양쪽**에 설치한다.
+
+**step 패널티:** `hits = obstacle_hits_pending` (읽고 0으로 리셋). `action is not None and hits > 0`이면 `step_reward -= obstacle_penalty(15.0)`. **hit 수와 무관하게 스텝당 1회만 차감** — 한 번의 충돌이 hull+wheel 접촉을 동시에 시작할 수 있으므로. `info["obstacle_hit"] = True`, 항상 `info["obstacle_hits"] = hits` 기록. 에피소드는 종료되지 않음 (penalty-only; 차는 물리적으로 튕기며 감속).
+
+```python
+class ObstacleFrictionDetector(FrictionDetector):
+    def BeginContact(self, contact):
+        if self._is_obstacle_contact(contact):
+            self.env.obstacle_hits_pending += 1
+            return                                      # 타일 lap 카운트 스킵
+        super().BeginContact(contact)
+
+    def EndContact(self, contact):
+        if self._is_obstacle_contact(contact):
+            return
+        super().EndContact(contact)
+
+    @staticmethod
+    def _is_obstacle_contact(contact) -> bool:
+        try:
+            for ud in (contact.fixtureA.body.userData,
+                       contact.fixtureB.body.userData):
+                if ud is not None and getattr(ud, "is_obstacle", False):
+                    return True
+        except Exception:
+            return True                                 # 파괴 중 contact 안전 처리
+        return False
+
+# step() 내 패널티 적용
+def step(self, action):
+    obs, step_reward, terminated, truncated, info = super().step(action)
+    hits = self.obstacle_hits_pending
+    self.obstacle_hits_pending = 0
+    if action is not None and hits > 0:                 # 스텝당 1회만 차감
+        step_reward -= self.obstacle_penalty
+        info["obstacle_hit"] = True
+    info["obstacle_hits"] = hits
+    return obs, step_reward, terminated, truncated, info
+```
+
+---
 
 ### 5.5 재현성 segfault 수정
 
-§3.2(i) 참조 — `_destroy()`에서 body 파괴 전 listener detach.
+**근본 원인:** 차가 장애물에 접촉한 상태에서 `reset()`이 호출되면, `_destroy()` 내부의 `DestroyBody()` 실행 중 Box2D가 `EndContact` 콜백을 **반쪽 파괴된 body에 대해** 재진입 호출한다. 이때 Python 측 `userData`가 이미 해제된 포인터를 참조하여 **segfault**가 발생한다.
+
+**수정:** `_destroy()`에서 body 파괴 **전에** `contactListener`를 `None`으로 detach한다. listener는 `reset()`에서 `super().reset()` 직후 재설치된다.
+
+```python
+def _destroy(self):
+    # body 파괴 전 listener detach — 파괴 중 EndContact 재진입 segfault 방지
+    self.world.contactListener                = None
+    self.world.contactListener_bug_workaround = None
+    for body in self.obstacle_bodies:
+        self.world.DestroyBody(body)
+    self.obstacle_bodies = []
+    super()._destroy()
+
+def reset(self, *, seed=None, options=None):
+    obs, info = super().reset(seed=seed, options=options)
+    # super().reset()이 설치한 FrictionDetector를 ObstacleFrictionDetector로 교체
+    detector = ObstacleFrictionDetector(self, self.lap_complete_percent)
+    self.world.contactListener_bug_workaround = detector
+    self.world.contactListener                = detector
+    self.obstacle_hits_pending = 0
+    self._spawn_obstacles()
+    obs = self._render("state_pixels")                  # 장애물 포함 첫 프레임 갱신
+    self.state = obs
+    return obs, info
+```
+
+---
+
+추가로 필요하면 아래 항목들을 더 작성해드릴 수 있어요:
+
+- **5.6 관측 공간 / 행동 공간** — 부모 클래스에서 그대로 상속하는지, 변경 사항이 있는지
+- **5.7 환경 검증 코드** — `gym.make()` + `env.reset()` + `env.step()` 스모크 테스트 예시
+- **전체 완성 코드 블록** — 보고서 부록용 정리본
+
+필요한 게 있으면 말씀해 주세요!
 
 ---
 
