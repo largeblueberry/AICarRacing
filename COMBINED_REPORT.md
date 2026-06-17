@@ -1136,40 +1136,212 @@ python scripts/record_video.py \
 
 ## 2. 환경 설계 — `CarRacingObstacles-v0` (`src/car_racing_obstacles.py`)
 
-CarRacing의 `CarRacing` 클래스를 상속한 변형 환경. 등록 id `CarRacingObstacles-v0`, `max_episode_steps=1000`.
+`CarRacing` 클래스를 상속한 변형 환경. 등록 ID `CarRacingObstacles-v0`, `max_episode_steps=1000`.
+
+---
 
 ### 2.1 장애물 배치
-- 트랙 타일 위에 **`n_obstacles=10`개의 Box2D 정적 바디**를 배치.
-- **재현성**: 배치 타일·위치·크기 모두 `self.np_random`(reset seed로 시드됨)에서 샘플 → **같은 시드 = 같은 장애물 배치**.
-- **양끝 클리어**: 트랙은 **루프**라서 끝 타일이 시작선 바로 뒤에 온다. `range(start_clear_tiles, n_tiles - start_clear_tiles)`로 **양끝 모두** 비워 차 위에 스폰되는 것을 방지(`start_clear_tiles=30`).
-- **최소 간격** `min_tile_gap=12` 타일.
-- **통과 틈 보장**: 장애물 바깥 모서리를 도로 반폭의 ~80% 이내로 제한.
 
-### 2.2 픽셀 가시성 (중요)
-에이전트 입력은 픽셀(96×96 grayscale ×4)이므로, **장애물이 관측에 그려져야** 회피를 학습할 수 있다. 각 장애물을 **흰색 `(255,255,255)` 사각형으로 `road_poly`에 추가** → grayscale에서 도로(~102)·잔디(~162) 대비 **255로 고대비**. (`reset()`에서 장애물 생성 후 관측을 다시 렌더해 프레임 0부터 보이게 함.)
+트랙 타일 위에 `n_obstacles=10`개의 Box2D 정적 바디를 배치한다. 배치 로직은 `_spawn_obstacles()`에 구현되어 있으며, `reset()` 내부에서 호출된다.
+
+**재현성:** 배치 타일·위치·크기 모두 `self.np_random`(reset seed로 시드됨)에서 샘플링하므로, 같은 시드를 주면 항상 동일한 장애물 배치가 재현된다.
+
+```python
+candidates = list(range(self.start_clear_tiles, n_tiles - self.start_clear_tiles))
+self.np_random.shuffle(candidates)   # 시드별 재현 가능 셔플
+```
+
+**양끝 클리어:** 트랙은 루프 구조라 끝 타일이 시작선 바로 뒤에 위치한다. `range(start_clear_tiles, n_tiles - start_clear_tiles)`로 **양끝을 모두** 비워, 차가 장애물 위에 스폰되는 것을 방지한다(`start_clear_tiles=30`). 트랙이 너무 짧아 `n_tiles <= 2 * start_clear_tiles + 1`이면 early-return한다.
+
+**최소 간격:** 이미 선택된 타일과 `>= min_tile_gap(=12)` 떨어진 후보만 greedy하게 선택한다.
+
+```python
+chosen = []
+for idx in candidates:
+    if len(chosen) >= self.n_obstacles:
+        break
+    if all(abs(idx - c) >= self.min_tile_gap for c in chosen):
+        chosen.append(idx)
+```
+
+**통과 틈 보장:** 장애물의 횡방향 오프셋을 `max_offset = 0.8 * TRACK_WIDTH - half`로 제한하여, 장애물 바깥 모서리가 도로 반폭의 ~80% 이내에 위치하도록 강제한다. 이로써 항상 한쪽에 통과 가능한 틈이 남는다.
+
+```python
+max_offset = max(0.0, 0.8 * TRACK_WIDTH - half)
+offset     = self.np_random.uniform(-max_offset, max_offset)
+# (cos β, sin β) 가 도로 횡단축 — _create_track 과 동일 관례
+px = x + offset * math.cos(beta)
+py = y + offset * math.sin(beta)
+```
+
+---
+
+### 2.2 픽셀 가시성
+
+에이전트 입력은 96×96 grayscale ×4 픽셀이므로, **장애물이 관측에 그려져야** 회피를 학습할 수 있다. 장애물을 Box2D 물리 바디로만 두면 충돌은 발생하지만 픽셀 관측에는 나타나지 않아 에이전트가 인지할 수 없다.
+
+**해결:** 각 장애물을 흰색 `(255, 255, 255)` 사각형으로 `road_poly`에 추가한다. `road_poly`는 렌더러가 매 프레임 그리는 폴리곤 목록이므로, 장애물이 96×96 관측에 자동으로 포함된다.
+
+```python
+OBSTACLE_COLOR = (255, 255, 255)   # grayscale 255 — 도로 ~102, 잔디 ~162 대비
+
+c, s = math.cos(beta), math.sin(beta)
+quad = [
+    (px + dx*c - dy*s, py + dx*s + dy*c)
+    for dx, dy in ((-half,-half),(half,-half),(half,half),(-half,half))
+]
+self.road_poly.append((quad, OBSTACLE_COLOR))
+```
+
+grayscale 기준 **255 vs 도로 ~102, 잔디 ~162**로 고대비를 형성하여 픽셀 입력 에이전트가 명확히 인지할 수 있다. 또한 `reset()`에서 장애물 생성 후 관측을 **한 번 더 렌더링**하여, 프레임 0부터 장애물이 보이도록 한다.
+
+```python
+def reset(self, *, seed=None, options=None):
+    obs, info = super().reset(seed=seed, options=options)
+    ...
+    self._spawn_obstacles()
+    obs = self._render("state_pixels")   # 장애물 포함 첫 프레임 갱신
+    self.state = obs
+    return obs, info
+```
+
+---
 
 ### 2.3 크기 랜덤화
-- 장애물마다 `size_frac = uniform(obstacle_size_min, obstacle_size_max)`를 샘플, 한 변 = `size_frac × TRACK_WIDTH / 2`.
-- **기하 관계**: 장애물 전체폭 = `size_frac × TRACK_WIDTH`, 도로 전체폭 = `2 × TRACK_WIDTH`. 즉 **`size_frac = 2.0`이 도로폭과 같고, `> 2.0`이면 도로보다 크다.**
-- 기본 범위 **0.25–0.6** (도로폭의 ~12~30% → 항상 통과 틈 존재). `min==max`로 고정 크기 가능.
-- **대형 변형(설계 완료)**: `2.0–3.0`으로 주면 **도로를 가로막는 벽** → 통과하려면 잔디로 우회해야 함(별도 난이도, 4절 참조).
+
+장애물마다 크기를 독립적으로 샘플링한다.
+
+$$\text{size\_frac} \sim \mathcal{U}(\text{obstacle\_size\_min},\ \text{obstacle\_size\_max}), \quad \text{half} = \frac{\text{size\_frac} \times \text{TRACK\_WIDTH}}{2}$$
+
+```python
+size_frac = self.np_random.uniform(self.obstacle_size_min, self.obstacle_size_max)
+half      = size_frac * TRACK_WIDTH / 2.0
+```
+
+장애물 전체 폭과 도로 폭의 관계는 다음과 같다.
+
+$$\text{장애물 전체폭} = \text{size\_frac} \times \text{TRACK\_WIDTH}, \quad \text{도로 전체폭} = 2 \times \text{TRACK\_WIDTH}$$
+
+따라서 `size_frac = 2.0`이 도로폭과 같고, `> 2.0`이면 도로보다 크다.
+
+| 설정 | `size_frac` 범위 | 도로폭 대비 | 특성 |
+|---|---|---|---|
+| 기본 (회피 학습) | `0.25 – 0.6` | ~12 – 30% | 항상 통과 틈 존재 |
+| 대형 변형 (벽) | `2.0 – 3.0` | 도로 전체 이상 | 잔디로 우회 필요 |
+
+기본 범위 **0.25–0.6**에서는 통과 틈이 항상 존재하며, `min == max`로 설정하면 고정 크기로 동작한다. 대형 변형(`2.0–3.0`)은 도로를 완전히 가로막는 벽으로 작동하여 에이전트가 잔디로 우회해야 하는 별도 난이도를 구성한다(4절 참조).
+
+---
 
 ### 2.4 충돌 검출 및 패널티
-- `ObstacleFrictionDetector`(부모 `FrictionDetector` 상속)가 차–장애물 접촉을 감지.
-- **새 접촉이 시작된 스텝마다 `obstacle_penalty=15` 차감** (패널티 전용 — 에피소드는 계속, 차는 물리적으로 튕기며 감속). 한 스텝에 hull+바퀴 동시 접촉이 잡혀도 **스텝당 1회만** 차감.
+
+`ObstacleFrictionDetector`(`FrictionDetector` 상속)가 차–장애물 접촉을 감지한다.
+
+| 메서드 | 동작 |
+|---|---|
+| `BeginContact` | 장애물 접촉이면 `obstacle_hits_pending += 1` 후 `return` (부모 lap 카운트 스킵), 아니면 `super().BeginContact()` |
+| `EndContact` | 장애물 접촉이면 early-return, 아니면 `super().EndContact()` |
+| `_is_obstacle_contact` | `userData.is_obstacle` 확인; 예외 발생 시 `True` 반환 (파괴 중 contact가 시뮬레이터를 크래시시키지 않도록 belt-and-braces) |
+
+```python
+class ObstacleFrictionDetector(FrictionDetector):
+    def BeginContact(self, contact):
+        if self._is_obstacle_contact(contact):
+            self.env.obstacle_hits_pending += 1
+            return                          # 타일 lap 카운트 스킵
+        super().BeginContact(contact)
+
+    @staticmethod
+    def _is_obstacle_contact(contact) -> bool:
+        try:
+            for ud in (contact.fixtureA.body.userData,
+                       contact.fixtureB.body.userData):
+                if ud is not None and getattr(ud, "is_obstacle", False):
+                    return True
+        except Exception:
+            return True                     # 파괴 중 contact 안전 처리
+        return False
+```
+
+**step 패널티:** `obstacle_hits_pending`을 읽고 즉시 0으로 리셋한다. `action is not None and hits > 0`이면 `step_reward -= obstacle_penalty(15.0)`를 적용한다. hit 수와 무관하게 **스텝당 1회만 차감**하는데, 이는 한 번의 충돌이 hull과 바퀴 접촉을 동시에 시작하여 `hits`가 여러 개 누적될 수 있기 때문이다. 에피소드는 종료되지 않으며(penalty-only), 차는 물리적으로 튕기며 감속한다.
+
+```python
+def step(self, action):
+    obs, step_reward, terminated, truncated, info = super().step(action)
+    hits = self.obstacle_hits_pending
+    self.obstacle_hits_pending = 0
+    if action is not None and hits > 0:     # 스텝당 1회만 차감
+        step_reward -= self.obstacle_penalty
+        info["obstacle_hit"] = True
+    info["obstacle_hits"] = hits
+    return obs, step_reward, terminated, truncated, info
+```
 
 ---
 
 ## 3. 환경 구축 시 해결한 버그 (엔지니어링 핵심)
 
 ### 3.1 SEGFAULT — 본체 파괴 중 contact 콜백 재진입 (Linux box2d-py)
-- **증상**: 64개 env가 첫 에피소드를 끝내고 autoreset하는 순간 전원 segfault(`pygame_parachute`).
-- **원인**: 차가 장애물에 닿은 채 에피소드가 끝나면, reset의 `_destroy()`에서 `DestroyBody(장애물)` 도중 Box2D가 **EndContact 콜백을 발사** → 반쯤 파괴된 바디의 `userData`를 Python에서 접근 → segfault. (macOS는 우연히 살아남아 로컬 테스트가 못 잡음.)
-- **수정**: `_destroy()`에서 바디 파괴 **전에 contact listener를 분리**(`self.world.contactListener = None`). 리스너는 `CarRacing.reset()`이 직후 재설치하므로 게임플레이 영향 없음.
+
+**증상:** 64개 env가 첫 에피소드를 끝내고 autoreset하는 순간 전원 segfault(`pygame_parachute`). macOS에서는 우연히 살아남아 로컬 테스트가 잡지 못했다.
+
+**원인:** 차가 장애물에 닿은 채 에피소드가 끝나면, `reset()`의 `_destroy()`에서 `DestroyBody(장애물)` 실행 도중 Box2D가 **EndContact 콜백을 발사**한다. 이때 반쯤 파괴된 바디의 `userData`를 Python에서 접근하면서 segfault가 발생한다.
+
+```
+reset() 호출
+  └─ _destroy()
+       └─ world.DestroyBody(obstacle_body)   ← Box2D 내부에서
+            └─ EndContact(contact) 콜백 발사  ← 반쯤 파괴된 body
+                 └─ contact.fixtureA.body.userData 접근 → SEGFAULT
+```
+
+**수정:** `_destroy()`에서 바디 파괴 **전에** `contactListener`를 `None`으로 분리한다. 리스너는 `CarRacing.reset()`이 `super().reset()` 직후 재설치하므로 게임플레이에 영향이 없다.
+
+```python
+def _destroy(self):
+    # 바디 파괴 전 listener 분리 — 파괴 중 EndContact 재진입 segfault 방지
+    self.world.contactListener                = None   # ← 핵심 수정
+    self.world.contactListener_bug_workaround = None
+    for body in self.obstacle_bodies:
+        self.world.DestroyBody(body)
+    self.obstacle_bodies = []
+    super()._destroy()
+
+def reset(self, *, seed=None, options=None):
+    obs, info = super().reset(seed=seed, options=options)   # 리스너 재설치됨
+    detector = ObstacleFrictionDetector(self, self.lap_complete_percent)
+    self.world.contactListener_bug_workaround = detector    # 재설치
+    self.world.contactListener                = detector
+    ...
+```
+
+---
 
 ### 3.2 차 위에 장애물 스폰 (loop-spawn)
-- **원인**: 트랙이 루프라 끝 타일이 시작선 뒤 → 한쪽 끝만 비우면 차 스폰 위치에 장애물.
-- **수정**: 배치 후보를 `range(start_clear_tiles, n_tiles - start_clear_tiles)`로 **양끝 제외**.
+
+**원인:** 트랙이 루프 구조이므로 끝 타일(`n_tiles - 1` 근방)이 시작선 바로 뒤에 위치한다. 앞쪽 끝(`< start_clear_tiles`)만 제외하고 뒤쪽 끝을 포함하면, 시작선 직후 타일에 장애물이 스폰되어 차 위에 겹친다.
+
+```
+타일 인덱스:  0 ──────────────────────────── n_tiles-1
+              [시작선]                         [시작선 바로 뒤]
+              ← 앞쪽 끝 →                 ← 뒤쪽 끝 →
+              (루프이므로 이 두 구간이 물리적으로 인접)
+```
+
+**수정:** 배치 후보를 `range(start_clear_tiles, n_tiles - start_clear_tiles)`로 **양끝 모두 제외**한다. 트랙이 너무 짧아 유효 구간이 없으면(`n_tiles <= 2 * start_clear_tiles + 1`) early-return한다.
+
+```python
+def _spawn_obstacles(self):
+    n_tiles = len(self.track)
+    if n_tiles <= 2 * self.start_clear_tiles + 1:
+        return                                        # 유효 구간 없음 → 스킵
+
+    # 양끝 모두 제외 — 루프 트랙의 뒤쪽 끝도 시작선 인접
+    candidates = list(range(self.start_clear_tiles,
+                            n_tiles - self.start_clear_tiles))  # ← 핵심 수정
+    self.np_random.shuffle(candidates)
+    ...
+```
 
 ### 3.3 로깅 무력화 — 벡터 env info 포맷 (셰이핑 지표 전부 미기록)
 - **증상**: 학습 TB 로그에 `penalties/mean_accel_turn`, `driving/mean_percent_off_track`, `driving/mean_obstacle_hits`, `rewards/mean_velocity`가 **하나도 안 찍힘** (charts/losses만).
