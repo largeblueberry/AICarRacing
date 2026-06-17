@@ -1211,7 +1211,7 @@ def reset(self, *, seed=None, options=None):
 
 장애물마다 크기를 독립적으로 샘플링한다.
 
-$$\text{size\_frac} \sim \mathcal{U}(\text{obstacle\_size\_min},\ \text{obstacle\_size\_max}), \quad \text{half} = \frac{\text{size\_frac} \times \text{TRACK\_WIDTH}}{2}$$
+$$\mathit{size\_frac} \sim \mathcal{U}(\mathit{obstacle\_size\_min},\ \mathit{obstacle\_size\_max}), \quad \mathit{half} = \frac{\mathit{size\_frac} \times \mathit{TRACK\_WIDTH}}{2}$$
 
 ```python
 size_frac = self.np_random.uniform(self.obstacle_size_min, self.obstacle_size_max)
@@ -1220,7 +1220,7 @@ half      = size_frac * TRACK_WIDTH / 2.0
 
 장애물 전체 폭과 도로 폭의 관계는 다음과 같다.
 
-$$\text{장애물 전체폭} = \text{size\_frac} \times \text{TRACK\_WIDTH}, \quad \text{도로 전체폭} = 2 \times \text{TRACK\_WIDTH}$$
+$$\text{장애물 전체폭} = \mathit{size\_frac} \times \mathit{TRACK\_WIDTH}, \quad \text{도로 전체폭} = 2 \times \mathit{TRACK\_WIDTH}$$
 
 따라서 `size_frac = 2.0`이 도로폭과 같고, `> 2.0`이면 도로보다 크다.
 
